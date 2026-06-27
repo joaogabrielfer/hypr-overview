@@ -4,13 +4,15 @@
 `scrolling` layout:
 
 - every workspace is a row;
+- each workspace row keeps a monitor-like aspect ratio instead of stretching
+  edge to edge;
 - scrolling columns are arranged horizontally inside their workspace row;
 - windows stacked in a column retain their vertical arrangement;
 - empty and single-column workspaces remain visible;
 - previews use the live Wayland surface content.
 
-The plugin renders an overlay. It does not resize windows or mutate scrolling
-column widths.
+The plugin renders an animated overlay. It does not resize windows or mutate
+scrolling column widths.
 
 ## Install with hyprpm
 
@@ -46,6 +48,7 @@ This repository does not modify your Hyprland configuration.
 ## Interaction
 
 - Toggle again to apply the selected window and close.
+- `Return` or keypad enter applies the current selection and zooms back in.
 - Existing Hyprland focus/workspace shortcuts continue working while open.
 - Hover selects a window.
 - Left click selects and opens a window or workspace.
@@ -88,6 +91,7 @@ All settings are optional and use the `plugin:hyproverview` namespace.
 | `column_gap` | `10` |
 | `window_gap` | `8` |
 | `rounding` | `10` |
+| `animation_duration_ms` | `220` |
 | `background_opacity` | `0.94` |
 | `background_color` | `#101018` |
 | `row_color` | `#242432` |

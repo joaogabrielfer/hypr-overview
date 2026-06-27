@@ -36,6 +36,7 @@ extern "C" {
 #include <hyprland/src/layout/algorithm/tiled/scrolling/ScrollingAlgorithm.hpp>
 #include <hyprland/src/layout/space/Space.hpp>
 #include <hyprland/src/managers/PointerManager.hpp>
+#include <hyprland/src/managers/SeatManager.hpp>
 #include <hyprland/src/plugins/PluginAPI.hpp>
 #include <hyprland/src/render/Renderer.hpp>
 #include <hyprland/src/render/pass/RectPassElement.hpp>
@@ -64,11 +65,18 @@ struct SOverviewConfig {
   int columnGap = 10;
   int windowGap = 8;
   int rounding = 10;
+  int animationDurationMs = 220;
   float backgroundOpacity = 0.94F;
   CHyprColor backgroundColor = CHyprColor{0xFF101018};
   CHyprColor rowColor = CHyprColor{0xFF242432};
   CHyprColor activeRowColor = CHyprColor{0xFF303044};
   CHyprColor selectionColor = CHyprColor{0xFF7AA2F7};
+};
+
+enum class EOverviewPhase {
+  ENTERING,
+  ACTIVE,
+  EXITING,
 };
 
 struct SWindowThumbnail {
@@ -84,12 +92,15 @@ struct SWorkspaceThumbnail {
 
 struct SOverviewState {
   bool active = false;
+  EOverviewPhase phase = EOverviewPhase::ENTERING;
+  Time::steady_tp phaseStartedAt = {};
   PHLMONITORREF monitor;
   PHLWORKSPACEREF originalWorkspace;
   PHLWINDOWREF originalFocus;
   PHLWINDOWREF selectedFocus;
   std::vector<SWindowThumbnail> windows;
   std::vector<SWorkspaceThumbnail> workspaces;
+  std::string pendingExitReason = "inactive";
 };
 
 inline SOverviewConfig g_config;
@@ -105,6 +116,7 @@ inline SP<Config::Values::CIntValue> g_cfgRowGap;
 inline SP<Config::Values::CIntValue> g_cfgColumnGap;
 inline SP<Config::Values::CIntValue> g_cfgWindowGap;
 inline SP<Config::Values::CIntValue> g_cfgRounding;
+inline SP<Config::Values::CIntValue> g_cfgAnimationDurationMs;
 inline SP<Config::Values::CFloatValue> g_cfgBackgroundOpacity;
 inline SP<Config::Values::CColorValue> g_cfgBackgroundColor;
 inline SP<Config::Values::CColorValue> g_cfgRowColor;
@@ -121,6 +133,7 @@ inline CHyprSignalListener g_monitorRemovedListener;
 inline CHyprSignalListener g_mouseMoveListener;
 inline CHyprSignalListener g_mouseButtonListener;
 inline CHyprSignalListener g_mouseAxisListener;
+inline CHyprSignalListener g_keyboardKeyListener;
 inline CHyprSignalListener g_configReloadedListener;
 
 static SDispatchResult ok() { return {}; }
@@ -148,6 +161,9 @@ static void syncConfig() {
     g_config.windowGap = std::max<int>(0, g_cfgWindowGap->value());
   if (g_cfgRounding)
     g_config.rounding = std::max<int>(0, g_cfgRounding->value());
+  if (g_cfgAnimationDurationMs)
+    g_config.animationDurationMs =
+        std::clamp<int>(g_cfgAnimationDurationMs->value(), 0, 2000);
   if (g_cfgBackgroundOpacity)
     g_config.backgroundOpacity =
         std::clamp(g_cfgBackgroundOpacity->value(), 0.F, 1.F);
@@ -177,6 +193,49 @@ static void damageOverview() {
 static void clearState(const std::string_view reason) {
   g_lastExitReason = reason;
   g_state = {};
+}
+
+static double animationDurationSeconds() {
+  return static_cast<double>(g_config.animationDurationMs) / 1000.0;
+}
+
+static float easedProgress(float t) {
+  const auto clamped = std::clamp(t, 0.F, 1.F);
+  return 1.F - std::pow(1.F - clamped, 3.F);
+}
+
+static float phaseProgress(const Time::steady_tp &now) {
+  if (!g_state.active)
+    return 0.F;
+
+  if (g_state.phase == EOverviewPhase::ACTIVE || g_config.animationDurationMs <= 0)
+    return 1.F;
+
+  const auto elapsed = std::chrono::duration<float>(now - g_state.phaseStartedAt)
+                           .count();
+  const auto duration = static_cast<float>(animationDurationSeconds());
+  if (duration <= 0.F)
+    return 1.F;
+
+  return easedProgress(elapsed / duration);
+}
+
+static bool phaseFinished(const Time::steady_tp &now) {
+  if (!g_state.active || g_state.phase == EOverviewPhase::ACTIVE ||
+      g_config.animationDurationMs <= 0)
+    return true;
+
+  return std::chrono::duration<float>(now - g_state.phaseStartedAt).count() >=
+         animationDurationSeconds();
+}
+
+static CBox lerpBox(const CBox &from, const CBox &to, float t) {
+  return {{std::lerp(from.x, to.x, t), std::lerp(from.y, to.y, t)},
+          {std::lerp(from.w, to.w, t), std::lerp(from.h, to.h, t)}};
+}
+
+static CHyprColor modulated(const CHyprColor &color, float alpha) {
+  return color.modifyA(std::clamp(alpha, 0.F, 1.F) * color.a);
 }
 
 static CScrollingAlgorithm *
@@ -211,11 +270,24 @@ workspacesForMonitor(const PHLMONITOR &monitor) {
   return result;
 }
 
+static CBox workspaceOverviewBox(const PHLMONITOR &monitor, double padding,
+                                 double y, double rowHeight) {
+  const auto availableWidth =
+      std::max(1.0, monitor->m_transformedSize.x - padding * 2.0);
+  const auto aspect =
+      monitor->m_transformedSize.y > 0
+          ? monitor->m_transformedSize.x / monitor->m_transformedSize.y
+          : 1.0;
+  const auto width = std::max(1.0, std::min(availableWidth, rowHeight * aspect));
+  return {{(monitor->m_transformedSize.x - width) / 2.0, y}, {width, rowHeight}};
+}
+
 static void renderRect(const CBox &box, const CHyprColor &color,
-                       const CBox &clip, int rounding = 0) {
+                       const CBox &clip, int rounding = 0,
+                       float alpha = 1.F) {
   CRectPassElement::SRectData data;
   data.box = box;
-  data.color = color;
+  data.color = modulated(color, alpha);
   data.round = rounding;
   data.roundingPower = 2.F;
   data.clipBox = clip;
@@ -248,7 +320,8 @@ static CBox fitBox(const CBox &bounds, double sourceWidth,
 
 static void renderWindowPreview(const PHLWINDOW &window,
                                 const PHLMONITOR &monitor, const CBox &bounds,
-                                const CBox &clip, const Time::steady_tp &) {
+                                const CBox &clip, const Time::steady_tp &,
+                                float alpha) {
   if (!window || !monitor || !window->m_isMapped || !window->wlSurface() ||
       !window->wlSurface()->resource())
     return;
@@ -261,7 +334,7 @@ static void renderWindowPreview(const PHLWINDOW &window,
   const auto target = fitBox(bounds, rootSize.x, rootSize.y);
   const auto scale = target.w / rootSize.x;
   rootSurface->breadthfirst(
-      [&target, &clip, &window, &rootSurface, rootSize,
+      [&target, &clip, &window, &rootSurface, rootSize, alpha,
        scale](SP<CWLSurfaceResource> surface, const Vector2D &offset, void *) {
         if (!surface || !surface->m_current.texture ||
             surface->m_current.size.x <= 0 || surface->m_current.size.y <= 0)
@@ -285,8 +358,8 @@ static void renderWindowPreview(const PHLWINDOW &window,
         CTexPassElement::SRenderData data;
         data.tex = surface->m_current.texture;
         data.box = textureBox;
-        data.a = fullCoverSubsurface ? 0.55F : 1.F;
-        data.overallA = 1.F;
+        data.a = (fullCoverSubsurface ? 0.55F : 1.F) * alpha;
+        data.overallA = alpha;
         data.damage = CRegion{textureBox};
         data.round =
             surface == window->wlSurface()->resource()
@@ -315,20 +388,20 @@ static void addWindowThumbnail(const PHLWINDOW &window,
                                const PHLWORKSPACE &workspace,
                                const PHLMONITOR &monitor, const CBox &cell,
                                const CBox &row, const CBox &fullClip,
-                               const Time::steady_tp &now) {
+                               const Time::steady_tp &now, float alpha) {
   if (!window)
     return;
 
   const auto selected = window == g_state.selectedFocus.lock();
   if (selected)
-    renderRect(cell, g_config.selectionColor, row, g_config.rounding);
+    renderRect(cell, g_config.selectionColor, row, g_config.rounding, alpha);
 
   const auto inner =
       insetBox(cell, selected ? std::max(3.0, 3.0 * monitor->m_scale)
                               : std::max(1.0, 1.0 * monitor->m_scale));
   renderRect(inner, CHyprColor{0.055F, 0.055F, 0.075F, 1.F}, row,
-             std::max(0, g_config.rounding - 2));
-  renderWindowPreview(window, monitor, inner, row, now);
+             std::max(0, g_config.rounding - 2), alpha);
+  renderWindowPreview(window, monitor, inner, row, now, alpha);
 
   g_state.windows.emplace_back(SWindowThumbnail{
       .window = window,
@@ -343,7 +416,7 @@ static void renderScrollingWorkspace(const PHLWORKSPACE &workspace,
                                      CScrollingAlgorithm *scrolling,
                                      const PHLMONITOR &monitor, const CBox &row,
                                      const CBox &fullClip,
-                                     const Time::steady_tp &now) {
+                                     const Time::steady_tp &now, float alpha) {
   if (!scrolling || !scrolling->m_scrollingData ||
       scrolling->m_scrollingData->columns.empty())
     return;
@@ -387,7 +460,8 @@ static void renderScrollingWorkspace(const PHLWORKSPACE &workspace,
                           std::max(0.01F, column->getTargetSize(i)) /
                           totalHeight;
       const CBox cell{{x, y}, {columnWidth, height}};
-      addWindowThumbnail(window, workspace, monitor, cell, row, fullClip, now);
+      addWindowThumbnail(window, workspace, monitor, cell, row, fullClip, now,
+                         alpha);
       y += height + windowGap;
     }
 
@@ -398,7 +472,7 @@ static void renderScrollingWorkspace(const PHLWORKSPACE &workspace,
 static void renderFallbackWorkspace(const PHLWORKSPACE &workspace,
                                     const PHLMONITOR &monitor, const CBox &row,
                                     const CBox &fullClip,
-                                    const Time::steady_tp &now) {
+                                    const Time::steady_tp &now, float alpha) {
   std::vector<PHLWINDOW> windows;
   for (const auto &window : g_pCompositor->m_windows) {
     if (window && window->m_workspace == workspace && window->m_isMapped &&
@@ -416,7 +490,8 @@ static void renderFallbackWorkspace(const PHLWORKSPACE &workspace,
   double x = row.x;
   for (const auto &window : windows) {
     const CBox cell{{x, row.y}, {width, row.h}};
-    addWindowThumbnail(window, workspace, monitor, cell, row, fullClip, now);
+    addWindowThumbnail(window, workspace, monitor, cell, row, fullClip, now,
+                       alpha);
     x += width + gap;
   }
 }
@@ -438,9 +513,12 @@ static void renderOverview() {
 
   const CBox fullClip{{0, 0}, monitor->m_transformedSize};
   const auto now = Time::steadyNow();
+  const auto progress = phaseProgress(now);
+  const auto visibleProgress =
+      g_state.phase == EOverviewPhase::EXITING ? 1.F - progress : progress;
   const auto background =
       g_config.backgroundColor.modifyA(g_config.backgroundOpacity);
-  renderRect(fullClip, background, fullClip);
+  renderRect(fullClip, background, fullClip, 0, visibleProgress);
 
   g_state.windows.clear();
   g_state.workspaces.clear();
@@ -455,20 +533,29 @@ static void renderOverview() {
   const auto activeWorkspace = monitor->m_activeSpecialWorkspace
                                    ? monitor->m_activeSpecialWorkspace
                                    : monitor->m_activeWorkspace;
+  const auto sourceBox = workspaceOverviewBox(monitor, padding, padding, rowHeight);
+  const auto hiddenBox =
+      insetBox(sourceBox, std::min(sourceBox.w, sourceBox.h) * 0.2);
 
   double y = padding;
   for (const auto &workspace : workspaces) {
-    const CBox outerRow{{padding, y},
-                        {std::max(1.0, fullClip.w - padding * 2.0), rowHeight}};
+    const auto targetRow = workspaceOverviewBox(monitor, padding, y, rowHeight);
+    const auto startRow =
+        workspace == activeWorkspace ? fullClip : hiddenBox;
+    const auto endRow =
+        g_state.phase == EOverviewPhase::EXITING ? startRow : targetRow;
+    const auto beginRow =
+        g_state.phase == EOverviewPhase::EXITING ? targetRow : startRow;
+    const auto outerRow = lerpBox(beginRow, endRow, progress);
     const auto active = workspace == activeWorkspace;
     renderRect(outerRow, active ? g_config.selectionColor : g_config.rowColor,
-               fullClip, g_config.rounding);
+               fullClip, g_config.rounding, visibleProgress);
 
     const auto border = active ? std::max(3.0, 3.0 * monitor->m_scale)
                                : std::max(1.0, 1.0 * monitor->m_scale);
     const auto row = insetBox(outerRow, border);
     renderRect(row, active ? g_config.activeRowColor : g_config.rowColor,
-               outerRow, std::max(0, g_config.rounding - 2));
+               outerRow, std::max(0, g_config.rounding - 2), visibleProgress);
 
     g_state.workspaces.emplace_back(SWorkspaceThumbnail{
         .workspace = workspace,
@@ -478,16 +565,29 @@ static void renderOverview() {
     if (auto *scrolling = scrollingAlgorithmFor(workspace); scrolling)
       renderScrollingWorkspace(
           workspace, scrolling, monitor,
-          insetBox(row, std::max(4.0, 4.0 * monitor->m_scale)), fullClip, now);
+          insetBox(row, std::max(4.0, 4.0 * monitor->m_scale)), fullClip, now,
+          visibleProgress);
     else
       renderFallbackWorkspace(
           workspace, monitor,
-          insetBox(row, std::max(4.0, 4.0 * monitor->m_scale)), fullClip, now);
+          insetBox(row, std::max(4.0, 4.0 * monitor->m_scale)), fullClip, now,
+          visibleProgress);
 
     y += rowHeight + rowGap;
   }
 
   g_pHyprRenderer->m_renderData.clipBox = fullClip;
+
+  if (g_state.phase == EOverviewPhase::ENTERING && phaseFinished(now))
+    g_state.phase = EOverviewPhase::ACTIVE;
+  else if (g_state.phase == EOverviewPhase::EXITING && phaseFinished(now)) {
+    const auto exitReason = g_state.pendingExitReason;
+    clearState(exitReason);
+    return;
+  }
+
+  if (g_state.active && g_state.phase != EOverviewPhase::ACTIVE)
+    damageOverview();
 }
 
 static PHLWINDOW windowAtOverviewPoint(const Vector2D &point) {
@@ -535,12 +635,10 @@ static void leaveOverview(bool restoreOriginal) {
   if (monitor && workspace)
     focusOverviewTarget(workspace, window);
 
-  if (monitor) {
-    g_pHyprRenderer->damageMonitor(monitor);
-    g_pCompositor->scheduleFrameForMonitor(monitor);
-  }
-
-  clearState(restoreOriginal ? "canceled" : "applied");
+  g_state.phase = EOverviewPhase::EXITING;
+  g_state.phaseStartedAt = Time::steadyNow();
+  g_state.pendingExitReason = restoreOriginal ? "canceled" : "applied";
+  damageOverview();
 }
 
 static SDispatchResult enterOverview() {
@@ -558,10 +656,13 @@ static SDispatchResult enterOverview() {
 
   clearState("entering");
   g_state.active = true;
+  g_state.phase = EOverviewPhase::ENTERING;
+  g_state.phaseStartedAt = Time::steadyNow();
   g_state.monitor = monitor;
   g_state.originalWorkspace = monitor->m_activeWorkspace;
   g_state.originalFocus = Desktop::focusState()->window();
   g_state.selectedFocus = Desktop::focusState()->window();
+  g_state.pendingExitReason = "applied";
   damageOverview();
   return ok();
 }
@@ -763,6 +864,10 @@ static void registerConfigValues() {
   g_cfgRounding = makeShared<Config::Values::CIntValue>(
       "plugin:hyproverview:rounding", "Overview card rounding", 10,
       Config::Values::SIntValueOptions{.min = 0, .max = 100});
+  g_cfgAnimationDurationMs = makeShared<Config::Values::CIntValue>(
+      "plugin:hyproverview:animation_duration_ms",
+      "Overview zoom animation duration in milliseconds", 220,
+      Config::Values::SIntValueOptions{.min = 0, .max = 2000});
   g_cfgBackgroundOpacity = makeShared<Config::Values::CFloatValue>(
       "plugin:hyproverview:background_opacity", "Overview backdrop opacity",
       0.94F, Config::Values::SFloatValueOptions{.min = 0.F, .max = 1.F});
@@ -788,6 +893,7 @@ static void registerConfigValues() {
   HyprlandAPI::addConfigValueV2(PHANDLE, g_cfgColumnGap);
   HyprlandAPI::addConfigValueV2(PHANDLE, g_cfgWindowGap);
   HyprlandAPI::addConfigValueV2(PHANDLE, g_cfgRounding);
+  HyprlandAPI::addConfigValueV2(PHANDLE, g_cfgAnimationDurationMs);
   HyprlandAPI::addConfigValueV2(PHANDLE, g_cfgBackgroundOpacity);
   HyprlandAPI::addConfigValueV2(PHANDLE, g_cfgBackgroundColor);
   HyprlandAPI::addConfigValueV2(PHANDLE, g_cfgRowColor);
@@ -925,6 +1031,25 @@ static void registerEventListeners() {
         damageOverview();
       });
 
+  g_keyboardKeyListener = Event::bus()->m_events.input.keyboard.key.listen(
+      [](IKeyboard::SKeyEvent event, Event::SCallbackInfo &info) {
+        if (!g_state.active || g_state.phase == EOverviewPhase::EXITING ||
+            event.state != WL_KEYBOARD_KEY_STATE_PRESSED)
+          return;
+
+        const auto keyboard = g_pSeatManager ? g_pSeatManager->m_keyboard : nullptr;
+        if (!keyboard || !keyboard->m_xkbState)
+          return;
+
+        const auto keysym =
+            xkb_state_key_get_one_sym(keyboard->m_xkbState, event.keycode + 8);
+        if (keysym != XKB_KEY_Return && keysym != XKB_KEY_KP_Enter)
+          return;
+
+        info.cancelled = true;
+        leaveOverview(false);
+      });
+
   g_configReloadedListener =
       Event::bus()->m_events.config.reloaded.listen([]() {
         syncConfig();
@@ -976,7 +1101,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
   }
 
   return {"hypr-overview", "Niri-style workspace and scrolling-column overview",
-          "Joao Gabriel", "2.0.0"};
+          "Joao Gabriel", "2.1.0"};
 }
 
 APICALL EXPORT void PLUGIN_EXIT() {
@@ -993,6 +1118,7 @@ APICALL EXPORT void PLUGIN_EXIT() {
   g_mouseMoveListener.reset();
   g_mouseButtonListener.reset();
   g_mouseAxisListener.reset();
+  g_keyboardKeyListener.reset();
   g_configReloadedListener.reset();
 
   HyprlandAPI::removeDispatcher(PHANDLE, "hyproverview_toggle");

@@ -20,6 +20,9 @@ end
 
 hl.bind(overviewKey, toggleOverview)
 
+-- Return and keypad Enter are built into the overview itself and apply the
+-- current selection without needing another bind.
+
 -- Optional appearance and interaction settings:
 -- hl.config({
 --     plugin = {
@@ -29,6 +32,7 @@ hl.bind(overviewKey, toggleOverview)
 --             column_gap = 10,
 --             window_gap = 8,
 --             rounding = 10,
+--             animation_duration_ms = 220,
 --             background_opacity = 0.94,
 --             background_color = "#101018",
 --             row_color = "#242432",
