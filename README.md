@@ -1,188 +1,116 @@
 # hypr-overview
 
-`hypr-overview` adds an overview mode for Hyprland's built-in `scrolling` layout.
+`hypr-overview` provides a Niri-style overview for Hyprland's built-in
+`scrolling` layout:
 
-It does not draw fake thumbnails or reimplement the layout. Instead, it snapshots the live scrolling columns, temporarily fits them all on screen, keeps that overview stable while you pick a target, and then restores the original column widths when you apply or cancel.
+- every workspace is a row;
+- scrolling columns are arranged horizontally inside their workspace row;
+- windows stacked in a column retain their vertical arrangement;
+- empty and single-column workspaces remain visible;
+- previews use the live Wayland surface content.
 
-## Current behavior
+The plugin renders an overlay. It does not resize windows or mutate scrolling
+column widths.
 
-- Only works on the active workspace when that workspace uses the built-in `scrolling` layout.
-- Refuses to enter on a fullscreen workspace.
-- Tracks real windows and real focus, so selection stays aligned with the live layout.
-- Handles window open, close, destroy, and workspace-move churn during overview by rebuilding its snapshot.
-- Supports one active overview session at a time.
-
-## Controls
-
-Once the plugin is loaded, it captures `SUPER + TAB` itself. Once overview is active, the plugin handles the rest of the interaction itself.
-
-- `SUPER + TAB`: enter overview
-- `Escape`: cancel overview
-- `Enter` or `Space`: apply overview
-- Arrow keys or `h/j/k/l`: move selection
-- Mouse hover: update selection
-- Left click on a tiled overview window: select and apply
-- Right or middle click: cancel
-- Mouse wheel: move selection left or right
-
-## Build
+## Install with hyprpm
 
 ```bash
-cmake -S . -B build
-cmake --build build -j"$(nproc)"
+hyprpm add https://github.com/joaogabrielfer/hypr-overview
+hyprpm enable hypr-overview
+hyprpm reload
 ```
 
-Artifact:
+Verify that it is loaded:
 
 ```bash
-build/hypr-overview.so
+hyprctl plugin list
 ```
 
-## Loading the plugin
+The output must include `Plugin hypr-overview`.
 
-Manual load:
+## Bind it
 
-```bash
-hyprctl plugin load /absolute/path/to/build/hypr-overview.so
-```
-
-Manual unload:
-
-```bash
-hyprctl plugin unload /absolute/path/to/build/hypr-overview.so
-```
-
-## Latest Lua config
-
-The validated Lua-era integration is:
+The plugin does not reserve `SUPER+TAB` or any other key. Copy
+`examples/hypr-overview.lua` into your Hyprland 0.55 Lua config and change:
 
 ```lua
-local overviewPlugin = "/absolute/path/to/hypr-overview/build/hypr-overview.so"
-
-hl.on("hyprland.start", function()
-    hl.timer(function()
-        hl.exec_cmd("hyprctl plugin load " .. overviewPlugin)
-    end, { timeout = 250, type = "oneshot" })
-end)
+local overviewKey = "SUPER + O"
 ```
 
-A complete example lives in [examples/hypr-overview.lua](/home/joaogabriel/personal/programming/projects/hypr-overview/examples/hypr-overview.lua:1).
+to your preferred key combination.
 
-Why this shape matters on Hyprland `0.55.4`:
+The legacy hyprlang equivalent is in `examples/hypr-overview.conf`.
 
-- custom plugin dispatchers are not exposed through `hl.dsp.*`
-- plugin config values are not available during the same top-level Lua parse that loads the plugin
-- top-level immediate calls such as `hl.plugin.hyproverview.setup(...)` do not verify cleanly during config parsing
-- delayed startup loading is the reliable path that verifies cleanly today
+This repository does not modify your Hyprland configuration.
 
-After the plugin loads, no extra bind is required for the default trigger. `SUPER + TAB` is handled internally by the plugin.
+## Interaction
 
-## Config
-
-The plugin has two configuration surfaces:
-
-- built-in defaults, which are what the validated Lua startup-load path uses
-- Hyprland config values and Lua callbacks, which are available for preloaded or non-Lua flows
-
-Built-in defaults:
-
-| option | default |
-| --- | --- |
-| `enabled` | `true` |
-| `cancel_on_workspace_switch` | `true` |
-| `click_select` | `true` |
-| `click_apply` | `true` |
-| `right_click_cancel` | `true` |
-| `warp_cursor_on_exit` | `true` |
-| `restore_original_on_invalid_selection` | `true` |
-| `fit_margin_factor` | `1.0` |
-| `wheel_steps` | `1` |
-| `exit_notification` | `"off"` |
-
-Registered config values:
-
-Internally the plugin also registers matching `plugin:hyproverview:*` values for Hyprland's config system.
-
-| option | type | default | meaning |
-| --- | --- | --- | --- |
-| `enabled` | `bool` | `true` | master enable switch |
-| `cancel_on_workspace_switch` | `bool` | `true` | cancel if focus moves to another workspace during overview |
-| `click_select` | `bool` | `true` | let pointer hover update selection |
-| `click_apply` | `bool` | `true` | let left click on a tiled overview window apply |
-| `right_click_cancel` | `bool` | `true` | let right or middle click cancel |
-| `warp_cursor_on_exit` | `bool` | `true` | warp the cursor to the selected window when leaving overview |
-| `restore_original_on_invalid_selection` | `bool` | `true` | fall back to the original focused window if the selection disappeared |
-| `fit_margin_factor` | `float` | `1.0` | scales fitted overview widths from `0.2` to `1.0` |
-| `wheel_steps` | `int` | `1` | number of selection moves per wheel step |
-| `exit_notification` | `string` | `"off"` | `"off"` or `"basic"` |
+- Toggle again to apply the selected window and close.
+- Existing Hyprland focus/workspace shortcuts continue working while open.
+- Hover selects a window.
+- Left click selects and opens a window or workspace.
+- Right or middle click cancels and returns to the original workspace/window.
+- Mouse wheel moves through workspace rows.
 
 ## Lua API
 
-The plugin registers these callbacks under `hl.plugin.hyproverview`:
+Hyprland 0.55 exposes these functions under `hl.plugin.hyproverview`:
 
 - `toggle()`
 - `apply()`
 - `cancel()`
+- `move("left" | "right" | "up" | "down")`
 - `active()`
 - `status()`
-- `setup()`
 
-These callbacks are registered by the plugin, but on Hyprland `0.55.4` they are not part of the validated top-level Lua startup path documented above. Treat them as advanced/runtime hooks rather than the primary config interface.
+Actions return `true` on success or `false, error` on failure.
 
-Return behavior:
-
-- `toggle`, `apply`, `cancel`, and `setup` return `true` on success
-- on failure they return `false, "error message"`
-- `active` returns `true` or `false`
-- `status` returns a table with `active`, `enabled`, `workspace_id`, `has_selection`, and the current effective options
-
-## Classic config
-
-If you are not on the Lua config manager, the plugin also registers classic dispatchers:
+## Legacy dispatchers
 
 - `hyproverview_toggle`
 - `hyproverview_apply`
 - `hyproverview_cancel`
+- `hyproverview_move` with `left`, `right`, `up`, or `down`
 - `hyproverview_status`
 
-Example:
+## Configuration
 
-```ini
-bind = SUPER, TAB, hyproverview_toggle
-```
+All settings are optional and use the `plugin:hyproverview` namespace.
 
-## Validation used
+| option | default |
+| --- | --- |
+| `enabled` | `true` |
+| `click_select` | `true` |
+| `click_apply` | `true` |
+| `right_click_cancel` | `true` |
+| `padding` | `30` |
+| `row_gap` | `18` |
+| `column_gap` | `10` |
+| `window_gap` | `8` |
+| `rounding` | `10` |
+| `background_opacity` | `0.94` |
+| `background_color` | `#101018` |
+| `row_color` | `#242432` |
+| `active_row_color` | `#303044` |
+| `selection_color` | `#7aa2f7` |
 
-Build and load validation:
+See `examples/hypr-overview.lua` for a Lua configuration block.
+
+## Manual build
 
 ```bash
-cmake -S . -B build
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j"$(nproc)"
-hyprctl plugin load /absolute/path/to/build/hypr-overview.so
-hyprctl plugin unload /absolute/path/to/build/hypr-overview.so
+hyprctl plugin load "$PWD/build/hypr-overview.so"
 ```
 
-Lua config validation against the example file:
+Hyprland plugins are ABI-specific. Build against headers matching the running
+Hyprland version.
 
-```bash
-PLUGIN=/absolute/path/to/hypr-overview/build/hypr-overview.so
-tmp=$(mktemp --suffix=.lua)
-sed "s#/absolute/path/to/hypr-overview/build/hypr-overview.so#$PLUGIN#" examples/hypr-overview.lua > "$tmp"
-Hyprland --verify-config -c "$tmp"
-rm -f "$tmp"
-```
+## Current scope
 
-Live checks completed:
-
-- build succeeds
-- plugin loads and unloads in the running compositor
-- the Lua startup-load example parses cleanly with `Hyprland --verify-config`
-
-## Known limits
-
-- current-workspace overview only
-- scrolling layout only
-- no fullscreen-workspace support
-- no custom dim/background renderer yet
-- no multi-workspace Niri-style global overview yet
-- floating windows stay live but are excluded from overview selection
+- workspaces on the focused monitor
+- normal workspaces (special workspaces are excluded)
+- scrolling layouts receive native column/stack positioning
+- other layouts fall back to a horizontal window row
+- floating windows are not shown yet
