@@ -1,0 +1,13 @@
+[repository]
+name = "hypr-overview"
+authors = ["joaogabrielfer"]
+commit_pins = []
+
+[hypr-overview]
+description = "Overview mode for Hyprland's scrolling layout"
+authors = ["joaogabrielfer"]
+output = "build/hypr-overview.so"
+build = [
+    "cmake -S . -B build",
+    "cmake --build build -j$(nproc)"
+]
