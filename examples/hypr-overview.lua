@@ -1,24 +1,7 @@
--- hypr-overview never installs a key binding itself. Change this to any
--- combination you want.
-local overviewKey = "SUPER + O"
-
-local function toggleOverview()
-    local plugin = hl.plugin.hyproverview
-
-    if plugin == nil then
-        hl.notification.create({
-            text = "hypr-overview is not loaded; run: hyprpm reload",
-            timeout = 3500,
-            color = "#f04444",
-        })
-        return
-    end
-
-    -- Entry failures are also displayed by the plugin as a notification.
-    plugin.toggle()
-end
-
-hl.bind(overviewKey, toggleOverview)
+-- Bind the overview to SUPER + TAB
+hl.bind("SUPER + TAB", function()
+    hl.plugin.hyproverview.toggle()
+end)
 
 -- Return and keypad Enter are built into the overview itself and apply the
 -- current selection without needing another bind.

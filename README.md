@@ -35,10 +35,12 @@ The output must include `Plugin hypr-overview`.
 ## Bind it
 
 The plugin does not reserve `SUPER+TAB` or any other key. Copy
-`examples/hypr-overview.lua` into your Hyprland 0.55 Lua config and change:
+`examples/hypr-overview.lua` or this snippet into your Hyprland 0.55 Lua config and the bind to the one you want:
 
 ```lua
-local overviewKey = "SUPER + O"
+hl.bind("SUPER + TAB", function()
+    hl.plugin.hyproverview.toggle()
+end)
 ```
 
 to your preferred key combination.
@@ -46,6 +48,9 @@ to your preferred key combination.
 The legacy hyprlang equivalent is in `examples/hypr-overview.conf`.
 
 This repository does not modify your Hyprland configuration.
+
+`hl.plugin.hyproverview.toggle()` is intended to be bound directly. The example
+uses a direct Lua bind, not a wrapper helper.
 
 ## Interaction
 
@@ -83,6 +88,11 @@ Actions return `true` on success or `false, error` on failure.
 ## Configuration
 
 All settings are optional and use the `plugin:hyproverview` namespace.
+
+Hyprland must load the plugin before evaluating your config for these keys to
+exist. `hyprpm enable ...` plus `hyprpm reload` is supported. Loading the
+plugin later from an autostart timer is too late for `hl.config({ plugin = {
+hyproverview = ... } })`.
 
 | option | default |
 | --- | --- |
