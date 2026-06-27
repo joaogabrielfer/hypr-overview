@@ -27,6 +27,7 @@ hl.bind(overviewKey, toggleOverview)
 -- hl.config({
 --     plugin = {
 --         hyproverview = {
+--             max_visible_workspaces = 3,
 --             padding = 30,
 --             row_gap = 18,
 --             column_gap = 10,

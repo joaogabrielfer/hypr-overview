@@ -6,6 +6,8 @@
 - every workspace is a row;
 - each workspace row keeps a monitor-like aspect ratio instead of stretching
   edge to edge;
+- wide scrolling workspaces expand laterally to reflect the full tape width
+  before clipping to the monitor;
 - scrolling columns are arranged horizontally inside their workspace row;
 - windows stacked in a column retain their vertical arrangement;
 - empty and single-column workspaces remain visible;
@@ -50,6 +52,8 @@ This repository does not modify your Hyprland configuration.
 - Toggle again to apply the selected window and close.
 - `Return` or keypad enter applies the current selection and zooms back in.
 - Existing Hyprland focus/workspace shortcuts continue working while open.
+- When there are more workspaces than fit, the overview shows a sliding window
+  of rows instead of shrinking every workspace.
 - Hover selects a window.
 - Left click selects and opens a window or workspace.
 - Right or middle click cancels and returns to the original workspace/window.
@@ -86,6 +90,7 @@ All settings are optional and use the `plugin:hyproverview` namespace.
 | `click_select` | `true` |
 | `click_apply` | `true` |
 | `right_click_cancel` | `true` |
+| `max_visible_workspaces` | `3` |
 | `padding` | `30` |
 | `row_gap` | `18` |
 | `column_gap` | `10` |

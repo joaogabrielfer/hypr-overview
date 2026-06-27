@@ -60,6 +60,7 @@ struct SOverviewConfig {
   bool clickSelect = true;
   bool clickApply = true;
   bool rightClickCancel = true;
+  int maxVisibleWorkspaces = 3;
   int padding = 30;
   int rowGap = 18;
   int columnGap = 10;
@@ -111,6 +112,7 @@ inline SP<Config::Values::CBoolValue> g_cfgEnabled;
 inline SP<Config::Values::CBoolValue> g_cfgClickSelect;
 inline SP<Config::Values::CBoolValue> g_cfgClickApply;
 inline SP<Config::Values::CBoolValue> g_cfgRightClickCancel;
+inline SP<Config::Values::CIntValue> g_cfgMaxVisibleWorkspaces;
 inline SP<Config::Values::CIntValue> g_cfgPadding;
 inline SP<Config::Values::CIntValue> g_cfgRowGap;
 inline SP<Config::Values::CIntValue> g_cfgColumnGap;
@@ -151,6 +153,9 @@ static void syncConfig() {
     g_config.clickApply = g_cfgClickApply->value();
   if (g_cfgRightClickCancel)
     g_config.rightClickCancel = g_cfgRightClickCancel->value();
+  if (g_cfgMaxVisibleWorkspaces)
+    g_config.maxVisibleWorkspaces =
+        std::clamp<int>(g_cfgMaxVisibleWorkspaces->value(), 1, 32);
   if (g_cfgPadding)
     g_config.padding = std::max<int>(0, g_cfgPadding->value());
   if (g_cfgRowGap)
@@ -270,15 +275,61 @@ workspacesForMonitor(const PHLMONITOR &monitor) {
   return result;
 }
 
+static size_t workspaceIndex(const std::vector<PHLWORKSPACE> &workspaces,
+                             const PHLWORKSPACE &workspace) {
+  const auto it = std::ranges::find(workspaces, workspace);
+  if (it == workspaces.end())
+    return 0;
+  return static_cast<size_t>(std::distance(workspaces.begin(), it));
+}
+
+static std::pair<size_t, size_t>
+visibleWorkspaceRange(const std::vector<PHLWORKSPACE> &workspaces,
+                      const PHLWORKSPACE &anchor) {
+  if (workspaces.empty())
+    return {0, 0};
+
+  const auto visibleCount = std::min<size_t>(
+      workspaces.size(), static_cast<size_t>(g_config.maxVisibleWorkspaces));
+  const auto anchorIdx = workspaceIndex(workspaces, anchor);
+  const auto preferredStart = anchorIdx >= visibleCount / 2
+                                  ? anchorIdx - visibleCount / 2
+                                  : 0;
+  const auto maxStart = workspaces.size() - visibleCount;
+  const auto start = std::min(preferredStart, maxStart);
+  return {start, start + visibleCount};
+}
+
+static double workspaceWidthFactor(const PHLWORKSPACE &workspace) {
+  if (auto *scrolling = scrollingAlgorithmFor(workspace);
+      scrolling && scrolling->m_scrollingData) {
+    const auto viewportWidth = scrolling->primaryViewportSize();
+    const auto maxWidth = scrolling->m_scrollingData->maxWidth();
+    if (viewportWidth > 0.0 && maxWidth > 0.0)
+      return std::max(1.0, maxWidth / viewportWidth);
+  }
+
+  size_t tiledWindows = 0;
+  for (const auto &window : g_pCompositor->m_windows) {
+    if (window && window->m_workspace == workspace && window->m_isMapped &&
+        !window->m_isFloating)
+      ++tiledWindows;
+  }
+
+  return std::max<double>(1.0, static_cast<double>(tiledWindows));
+}
+
 static CBox workspaceOverviewBox(const PHLMONITOR &monitor, double padding,
-                                 double y, double rowHeight) {
+                                 double y, double rowHeight,
+                                 double widthFactor) {
   const auto availableWidth =
       std::max(1.0, monitor->m_transformedSize.x - padding * 2.0);
   const auto aspect =
       monitor->m_transformedSize.y > 0
           ? monitor->m_transformedSize.x / monitor->m_transformedSize.y
           : 1.0;
-  const auto width = std::max(1.0, std::min(availableWidth, rowHeight * aspect));
+  const auto width =
+      std::max(1.0, std::min(availableWidth, rowHeight * aspect * widthFactor));
   return {{(monitor->m_transformedSize.x - width) / 2.0, y}, {width, rowHeight}};
 }
 
@@ -525,28 +576,33 @@ static void renderOverview() {
 
   const auto padding = g_config.padding * monitor->m_scale;
   const auto rowGap = g_config.rowGap * monitor->m_scale;
-  const auto availableHeight =
-      std::max(1.0, fullClip.h - padding * 2.0 -
-                        rowGap * static_cast<double>(workspaces.size() - 1));
-  const auto rowHeight =
-      std::max(1.0, availableHeight / static_cast<double>(workspaces.size()));
   const auto activeWorkspace = monitor->m_activeSpecialWorkspace
                                    ? monitor->m_activeSpecialWorkspace
                                    : monitor->m_activeWorkspace;
-  const auto sourceBox = workspaceOverviewBox(monitor, padding, padding, rowHeight);
+  const auto visibleRange = visibleWorkspaceRange(workspaces, activeWorkspace);
+  const auto visibleCount =
+      std::max<size_t>(1, visibleRange.second - visibleRange.first);
+  const auto availableHeight =
+      std::max(1.0, fullClip.h - padding * 2.0 -
+                        rowGap * static_cast<double>(visibleCount - 1));
+  const auto rowHeight =
+      std::max(1.0, availableHeight / static_cast<double>(visibleCount));
+  const auto activeWidthFactor = workspaceWidthFactor(activeWorkspace);
+  const auto sourceBox =
+      workspaceOverviewBox(monitor, padding, padding, rowHeight, activeWidthFactor);
   const auto hiddenBox =
       insetBox(sourceBox, std::min(sourceBox.w, sourceBox.h) * 0.2);
 
   double y = padding;
-  for (const auto &workspace : workspaces) {
-    const auto targetRow = workspaceOverviewBox(monitor, padding, y, rowHeight);
-    const auto startRow =
-        workspace == activeWorkspace ? fullClip : hiddenBox;
-    const auto endRow =
-        g_state.phase == EOverviewPhase::EXITING ? startRow : targetRow;
-    const auto beginRow =
-        g_state.phase == EOverviewPhase::EXITING ? targetRow : startRow;
-    const auto outerRow = lerpBox(beginRow, endRow, progress);
+  for (size_t workspacePos = visibleRange.first; workspacePos < visibleRange.second;
+       ++workspacePos) {
+    const auto &workspace = workspaces[workspacePos];
+    const auto targetRow = workspaceOverviewBox(
+        monitor, padding, y, rowHeight, workspaceWidthFactor(workspace));
+    const auto startRow = workspace == activeWorkspace ? fullClip : hiddenBox;
+    const auto outerRow = g_state.phase == EOverviewPhase::EXITING
+                              ? targetRow
+                              : lerpBox(startRow, targetRow, progress);
     const auto active = workspace == activeWorkspace;
     renderRect(outerRow, active ? g_config.selectionColor : g_config.rowColor,
                fullClip, g_config.rounding, visibleProgress);
@@ -849,6 +905,10 @@ static void registerConfigValues() {
   g_cfgRightClickCancel = makeShared<Config::Values::CBoolValue>(
       "plugin:hyproverview:right_click_cancel",
       "Cancel overview on right click", true);
+  g_cfgMaxVisibleWorkspaces = makeShared<Config::Values::CIntValue>(
+      "plugin:hyproverview:max_visible_workspaces",
+      "Maximum workspace rows visible before vertical scrolling", 3,
+      Config::Values::SIntValueOptions{.min = 1, .max = 32});
   g_cfgPadding = makeShared<Config::Values::CIntValue>(
       "plugin:hyproverview:padding", "Outer overview padding", 30,
       Config::Values::SIntValueOptions{.min = 0, .max = 300});
@@ -888,6 +948,7 @@ static void registerConfigValues() {
   HyprlandAPI::addConfigValueV2(PHANDLE, g_cfgClickSelect);
   HyprlandAPI::addConfigValueV2(PHANDLE, g_cfgClickApply);
   HyprlandAPI::addConfigValueV2(PHANDLE, g_cfgRightClickCancel);
+  HyprlandAPI::addConfigValueV2(PHANDLE, g_cfgMaxVisibleWorkspaces);
   HyprlandAPI::addConfigValueV2(PHANDLE, g_cfgPadding);
   HyprlandAPI::addConfigValueV2(PHANDLE, g_cfgRowGap);
   HyprlandAPI::addConfigValueV2(PHANDLE, g_cfgColumnGap);
@@ -1101,7 +1162,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
   }
 
   return {"hypr-overview", "Niri-style workspace and scrolling-column overview",
-          "Joao Gabriel", "2.1.0"};
+          "Joao Gabriel", "2.1.1"};
 }
 
 APICALL EXPORT void PLUGIN_EXIT() {
