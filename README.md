@@ -35,7 +35,7 @@ The output must include `Plugin hypr-overview`.
 ## Bind it
 
 The plugin does not reserve `SUPER+TAB` or any other key. Copy
-`examples/hypr-overview.lua` or this snippet into your Hyprland 0.55 Lua config and the bind to the one you want:
+`examples/hypr-overview.lua` or this snippet into your Hyprland 0.56 Lua config and the bind to the one you want:
 
 ```lua
 hl.bind("SUPER + TAB", function()
@@ -66,7 +66,7 @@ uses a direct Lua bind, not a wrapper helper.
 
 ## Lua API
 
-Hyprland 0.55 exposes these functions under `hl.plugin.hyproverview`:
+Hyprland 0.56 exposes these functions under `hl.plugin.hyproverview`:
 
 - `toggle()`
 - `apply()`

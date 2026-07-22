@@ -28,20 +28,22 @@ extern "C" {
 #include <hyprland/src/config/values/types/FloatValue.hpp>
 #include <hyprland/src/config/values/types/IntValue.hpp>
 #include <hyprland/src/desktop/state/FocusState.hpp>
+#include <hyprland/src/desktop/state/WindowState.hpp>
 #include <hyprland/src/desktop/view/Window.hpp>
 #include <hyprland/src/event/EventBus.hpp>
-#include <hyprland/src/helpers/Monitor.hpp>
 #include <hyprland/src/helpers/time/Time.hpp>
 #include <hyprland/src/layout/algorithm/Algorithm.hpp>
 #include <hyprland/src/layout/algorithm/tiled/scrolling/ScrollingAlgorithm.hpp>
 #include <hyprland/src/layout/space/Space.hpp>
-#include <hyprland/src/managers/PointerManager.hpp>
 #include <hyprland/src/managers/SeatManager.hpp>
+#include <hyprland/src/output/Monitor.hpp>
+#include <hyprland/src/pointer/PointerManager.hpp>
 #include <hyprland/src/plugins/PluginAPI.hpp>
 #include <hyprland/src/render/Renderer.hpp>
 #include <hyprland/src/render/pass/RectPassElement.hpp>
 #include <hyprland/src/render/pass/TexPassElement.hpp>
 #include <hyprland/src/render/types.hpp>
+#include <hyprland/src/state/WorkspaceState.hpp>
 #undef private
 
 inline HANDLE PHANDLE = nullptr;
@@ -191,7 +193,7 @@ static PHLMONITOR overviewMonitor() { return g_state.monitor.lock(); }
 static void damageOverview() {
   if (const auto monitor = overviewMonitor(); monitor) {
     g_pHyprRenderer->damageMonitor(monitor);
-    g_pCompositor->scheduleFrameForMonitor(monitor);
+    monitor->scheduleFrame();
   }
 }
 
@@ -261,7 +263,7 @@ workspacesForMonitor(const PHLMONITOR &monitor) {
   if (!monitor)
     return result;
 
-  for (const auto &workspaceRef : g_pCompositor->getWorkspaces()) {
+  for (const auto &workspaceRef : State::workspaceState()->workspaces()) {
     const auto workspace = workspaceRef.lock();
     if (!workspace || workspace->m_isSpecialWorkspace || workspace->m_id < 1)
       continue;
@@ -310,7 +312,7 @@ static double workspaceWidthFactor(const PHLWORKSPACE &workspace) {
   }
 
   size_t tiledWindows = 0;
-  for (const auto &window : g_pCompositor->m_windows) {
+  for (const auto &window : Desktop::windowState()->windows()) {
     if (window && window->m_workspace == workspace && window->m_isMapped &&
         !window->m_isFloating)
       ++tiledWindows;
@@ -525,7 +527,7 @@ static void renderFallbackWorkspace(const PHLWORKSPACE &workspace,
                                     const CBox &fullClip,
                                     const Time::steady_tp &now, float alpha) {
   std::vector<PHLWINDOW> windows;
-  for (const auto &window : g_pCompositor->m_windows) {
+  for (const auto &window : Desktop::windowState()->windows()) {
     if (window && window->m_workspace == workspace && window->m_isMapped &&
         !window->m_isFloating)
       windows.emplace_back(window);
@@ -994,7 +996,7 @@ static void registerEventListeners() {
         }
       });
 
-  const auto damageOnWindowChange = [](PHLWINDOW) {
+  const auto damageOnWindowChange = [] {
     if (g_state.active)
       damageOverview();
   };
@@ -1018,7 +1020,7 @@ static void registerEventListeners() {
       [](Vector2D, Event::SCallbackInfo &) {
         if (!g_state.active || !g_config.clickSelect)
           return;
-        const auto point = g_pPointerManager->position();
+        const auto point = Pointer::mgr()->position();
         if (const auto hovered = windowAtOverviewPoint(point);
             hovered && hovered != g_state.selectedFocus.lock()) {
           g_state.selectedFocus = hovered;
@@ -1043,7 +1045,7 @@ static void registerEventListeners() {
         if (event.button != kBtnLeft)
           return;
 
-        const auto point = g_pPointerManager->position();
+        const auto point = Pointer::mgr()->position();
         if (const auto window = windowAtOverviewPoint(point); window) {
           g_state.selectedFocus = window;
           if (g_config.clickApply)
@@ -1162,7 +1164,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
   }
 
   return {"hypr-overview", "Niri-style workspace and scrolling-column overview",
-          "Joao Gabriel", "2.1.1"};
+          "Joao Gabriel", "2.1.2"};
 }
 
 APICALL EXPORT void PLUGIN_EXIT() {
