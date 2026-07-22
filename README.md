@@ -13,6 +13,9 @@
 - empty and single-column workspaces remain visible;
 - previews use the live Wayland surface content.
 
+https://github.com/user-attachments/assets/a32fdfc6-8437-4186-9c7d-bd6fd386291e
+
+
 The plugin renders an animated overlay. It does not resize windows or mutate
 scrolling column widths.
 
